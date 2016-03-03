@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <title>Akka Streams Supervision</title>
+        <meta charset="utf-8">
+        <style>
+         @import url(https://fonts.googleapis.com/css?family=Ubuntu+Mono:400,700,400italic);
+         @import url(https://fonts.googleapis.com/css?family=Special+Elite|Coda);
+
+         body { font-family: 'Coda'; }
+         h1, h2, h3 {
+             font-family: 'Special Elite';
+             font-weight: normal;
+         }
+         .remark-code, .remark-inline-code { font-family: 'Ubuntu Mono'; }
+        </style>
+    </head>
+    <body>
+        <textarea id="source">
+
+class: center, middle
+
+# Akka Streams
+### Supervision
+
+Radzislaw Galler
+
+@gradzislaw
+
+Paycasso Verify Ltd.
+
+---
+
+# Akka Streams
+### Quick overview
+* Allows to define programs as transforming data flow from a source to a sink.
+
+--
+
+* Consists of general blocks like `Source`, `Flow`, `Graph`, and `Sink`
+
+--
+
+* Defines common operations like `map`, `zip`, `broadcast`, `merge`, `take`, `drop`, `filter`, etc.
+
+--
+
+* Controls back-pressure for you, i.e. slows down producer (upstream) to match consumption speed.
+
+--
+
+* Akka Streams API is completely decoupled from the Reactive Streams interfaces, but is fully interoperable with it.
+
+--
+
+Read more on http://akka.io/docs/
+
+---
+
+# Dropping elements
+_From the documentation_
+### Akka Streams does not send dropped stream elements to the dead letter office
+
+Elements can be dropped for a number of reasons:
+
+* plain user code can consume one element in a `map(...)` stage and produce an entirely different one as its result
+
+--
+* common stream operators drop elements intentionally, e.g. take/drop/filter/conflate/buffer/…
+
+--
+* stream failure will tear down the stream without waiting for processing to finish, all elements that are in flight will be discarded
+
+--
+* stream cancellation will propagate upstream (e.g. from a `take` operator) leading to upstream processing steps being terminated without having processed all of their inputs
+
+---
+   <div style="width: 960px; height: 600px; margin: 10px; position: relative;">
+       <iframe allowfullscreen frameborder="0" style="width:960px; height:600px" src="https://www.lucidchart.com/documents/embeddedchart/5931da0f-197c-4bc4-896b-8655cecd2640" id="gxGZX79uIMbH"></iframe>
+   </div>
+
+---
+
+```
+object Example {
+  implicit val system = ActorSystem("PSUG")
+  implicit val materializer = ActorMaterializer()
+  implicit val log = Logging(system, this.getClass)
+
+  val example = Flow.fromGraph(GraphDSL.create() { implicit builder =>
+    import GraphDSL.Implicits._
+    val MAX_THREADS = 4
+
+    // prepare graph elements
+    val broadcast = builder.add(Broadcast[Int](2).named("broadcast"))
+    val flow1 = Flow[Int].mapAsync(MAX_THREADS)(i => Future(i.toString)).log("flow1")
+    val flow2 = Flow[Int].map(i => if(i % 2 != 0) throw new Exception(s"$i is odd") else i.toString).log("flow2")
+    val zip = builder.add(ZipWith {(s1: String, s2: String) => s"($s1, $s2)"}.named("zip"))
+
+    // define the graph
+    broadcast ~> flow1 ~> zip.in0
+    broadcast ~> flow2 ~> zip.in1
+
+    // expose ports
+    FlowShape(broadcast.in, zip.out)
+  })
+
+  val source  = Source(1 to 10).log("source")
+  val sink = Sink.fold[String, String]("")(_ + _)
+}
+
+object Main extends App {
+  import Example._
+  example.runWith(source, sink)._2.map(println)
+}
+```
+---
+### Result:
+```terminal
+[info] Running io.github.rajish.Main
+[DEBUG] [03/03/2016 01:55:25.163] [run-main-0] [EventStream] StandardOutLogger started
+2016-03-03 01:55:25,505 |INFO | [] akka.event.slf4j.Slf4jLogger - Slf4jLogger started
+[DEBUG] [03/03/2016 01:55:25.512] [run-main-0] [EventStream(akka://PSUG)] logger log1-Slf4jLogger started
+[DEBUG] [03/03/2016 01:55:25.513] [run-main-0] [EventStream(akka://PSUG)] Default Loggers started
+2016-03-03 01:55:25,515 |DEBUG| [EventStream(akka://PSUG)] akka.event.EventStream - logger log1-Slf4jLogger started
+2016-03-03 01:55:25,518 |DEBUG| [EventStream(akka://PSUG)] akka.event.EventStream - Default Loggers started
+2016-03-03 01:55:25,696 |DEBUG| [Example$(akka://PSUG)] io.github.rajish.Example$ - [source] Element: 1
+2016-03-03 01:55:25,711 |ERROR| [Example$(akka://PSUG)] io.github.rajish.Example$ - [flow2] Upstream failed.
+java.lang.Exception: 1 is odd
+    at io.github.rajish.Example$$anonfun$1$$anonfun$3.apply(Main.scala:22)
+    at io.github.rajish.Example$$anonfun$1$$anonfun$3.apply(Main.scala:22)
+    at akka.stream.impl.fusing.Map.onPush(Ops.scala:29)
+    [...]
+2016-03-03 01:55:25,712 |DEBUG| [Example$(akka://PSUG)] io.github.rajish.Example$ - [flow1] Downstream finished.
+2016-03-03 01:55:25,712 |DEBUG| [Example$(akka://PSUG)] io.github.rajish.Example$ - [source] Element: 2
+2016-03-03 01:55:25,712 |DEBUG| [Example$(akka://PSUG)] io.github.rajish.Example$ - [source] Downstream finished.
+^C
+```
+
+---
+# Supervision
+
+```
+  val decider: Supervision.Decider = {
+    case e: Exception =>
+      log.error(s"Exception was caught, flow was restarted. Error: '${e.getMessage}'")
+      Supervision.Restart
+  }
+
+  example
+    .withAttributes(ActorAttributes.supervisionStrategy(decider))
+    .runWith(source, sink)
+    ._2.map(println)
+
+```
+
+---
+```terminal
+2016-03-03 02:16:50,175 |DEBUG| - [source] Element: 1
+2016-03-03 02:16:50,181 |ERROR| - Exception was caught, flow was restarted. Error: '1 is odd'
+2016-03-03 02:16:50,181 |DEBUG| - [source] Element: 2
+2016-03-03 02:16:50,181 |DEBUG| - [flow2] Element: 2
+2016-03-03 02:16:50,182 |DEBUG| - [flow1] Element: 1
+2016-03-03 02:16:50,182 |DEBUG| - [source] Element: 3
+2016-03-03 02:16:50,183 |ERROR| - Exception was caught, flow was restarted. Error: '3 is odd'
+2016-03-03 02:16:50,183 |DEBUG| - [source] Element: 4
+2016-03-03 02:16:50,183 |DEBUG| - [flow2] Element: 4
+2016-03-03 02:16:50,183 |DEBUG| - [flow1] Element: 2
+2016-03-03 02:16:50,184 |DEBUG| - [source] Element: 5
+2016-03-03 02:16:50,184 |ERROR| - Exception was caught, flow was restarted. Error: '5 is odd'
+2016-03-03 02:16:50,184 |DEBUG| - [source] Element: 6
+2016-03-03 02:16:50,184 |DEBUG| - [flow2] Element: 6
+2016-03-03 02:16:50,184 |DEBUG| - [flow1] Element: 3
+2016-03-03 02:16:50,185 |DEBUG| - [source] Element: 7
+2016-03-03 02:16:50,185 |ERROR| - Exception was caught, flow was restarted. Error: '7 is odd'
+2016-03-03 02:16:50,185 |DEBUG| - [flow1] Element: 4
+2016-03-03 02:16:50,185 |DEBUG| - [source] Element: 8
+2016-03-03 02:16:50,185 |DEBUG| - [flow2] Element: 8
+2016-03-03 02:16:50,185 |DEBUG| - [flow1] Element: 5
+2016-03-03 02:16:50,186 |DEBUG| - [source] Element: 9
+2016-03-03 02:16:50,186 |ERROR| - Exception was caught, flow was restarted. Error: '9 is odd'
+^C
+```
+???
+
+---
+# Supervision ctd.
+
+* The supervision decider keeps the stream going but eventually prevents it from completing.
+--
+
+* Both Resume and Restart strategies cause the same output.
+--
+
+* The stream deadlocks because it's unbalanced.
+
+---
+# Balancing buffer
+```
+    val buffer = Flow[Int].buffer(2, OverflowStrategy.backpressure)
+
+    ...
+
+    // define the graph
+    broadcast ~> buffer ~> flow1 ~> zip.in0
+    broadcast ~>           flow2 ~> zip.in1
+
+```
+
+See blog post http://blog.lancearlaus.com/akka/streams/scala/2015/05/27/Akka-Streams-Balancing-Buffer/
+---
+```terminal
+2016-03-03 02:45:43,696 |DEBUG| - [source] Element: 1
+2016-03-03 02:45:43,698 |ERROR| - Exception was caught, flow was restarted. Error: '1 is odd'
+2016-03-03 02:45:43,702 |DEBUG| - [source] Element: 2
+2016-03-03 02:45:43,702 |DEBUG| - [flow2] Element: 2
+2016-03-03 02:45:43,702 |DEBUG| - [flow1] Element: 1
+2016-03-03 02:45:43,703 |DEBUG| - [source] Element: 3
+2016-03-03 02:45:43,703 |ERROR| - Exception was caught, flow was restarted. Error: '3 is odd'
+2016-03-03 02:45:43,703 |DEBUG| - [source] Element: 4
+2016-03-03 02:45:43,703 |DEBUG| - [flow2] Element: 4
+2016-03-03 02:45:43,704 |DEBUG| - [flow1] Element: 2
+2016-03-03 02:45:43,704 |DEBUG| - [source] Element: 5
+2016-03-03 02:45:43,704 |ERROR| - Exception was caught, flow was restarted. Error: '5 is odd'
+2016-03-03 02:45:43,704 |DEBUG| - [source] Element: 6
+2016-03-03 02:45:43,704 |DEBUG| - [flow2] Element: 6
+2016-03-03 02:45:43,705 |DEBUG| - [flow1] Element: 3
+2016-03-03 02:45:43,705 |DEBUG| - [source] Element: 7
+2016-03-03 02:45:43,705 |ERROR| - Exception was caught, flow was restarted. Error: '7 is odd'
+2016-03-03 02:45:43,705 |DEBUG| - [source] Element: 8
+2016-03-03 02:45:43,705 |DEBUG| - [flow2] Element: 8
+2016-03-03 02:45:43,705 |DEBUG| - [flow1] Element: 4
+2016-03-03 02:45:43,706 |DEBUG| - [source] Element: 9
+2016-03-03 02:45:43,706 |ERROR| - Exception was caught, flow was restarted. Error: '9 is odd'
+2016-03-03 02:45:43,706 |DEBUG| - [source] Element: 10
+2016-03-03 02:45:43,706 |DEBUG| - [source] Upstream finished.
+2016-03-03 02:45:43,706 |DEBUG| - [flow2] Element: 10
+2016-03-03 02:45:43,706 |DEBUG| - [flow2] Upstream finished.
+2016-03-03 02:45:43,707 |DEBUG| - [flow1] Element: 5
+2016-03-03 02:45:43,707 |DEBUG| - [flow1] Downstream finished.
+2016-03-03 02:45:43,708 |INFO | - (1, 2)(2, 4)(3, 6)(4, 8)(5, 10)
+```
+---
+# Going functional
+
+```
+import scalaz.Scalaz._
+import scalaz.{\/, -\/, \/-}
+
+[...]
+
+    val flow2 = Flow[Int].map{ i =>
+      if(i % 2 != 0)
+        \/.fromTryCatchThrowable[String, Throwable](throw new Exception(s"$i is odd"))
+      else
+        \/.fromTryCatchThrowable[String, Throwable](i.toString)
+    }.log("flow2")
+    val zip = builder.add(ZipWith {(s1: String, s2: \/[Throwable, String]) => (s1, s2)}.named("zip"))
+
+[...]
+
+  val sink = Sink.foreach[(String, \/[Throwable, String])] {
+    case (s1, \/-(s2)) => log.info(s"[sink] ($s1, $s2)")
+    case x => log.error(s"error in input: $x")
+  }
+
+```
+---
+```terminal
+2016-03-03 03:21:21,913 |DEBUG|  - [source] Element: 1
+2016-03-03 03:21:21,934 |DEBUG|  - [flow2] Element: -\/(java.lang.Exception: 1 is odd)
+2016-03-03 03:21:21,936 |DEBUG|  - [flow1] Element: 1
+2016-03-03 03:21:21,938 |ERROR|  - error in input: (1,-\/(java.lang.Exception: 1 is odd))
+2016-03-03 03:21:21,938 |DEBUG|  - [source] Element: 2
+2016-03-03 03:21:21,938 |DEBUG|  - [flow2] Element: \/-(2)
+2016-03-03 03:21:21,938 |DEBUG|  - [flow1] Element: 2
+2016-03-03 03:21:21,939 |INFO |  - [sink] (2, 2)
+2016-03-03 03:21:21,940 |DEBUG|  - [source] Element: 3
+2016-03-03 03:21:21,940 |DEBUG|  - [flow2] Element: -\/(java.lang.Exception: 3 is odd)
+2016-03-03 03:21:21,940 |DEBUG|  - [flow1] Element: 3
+2016-03-03 03:21:21,940 |ERROR|  - error in input: (3,-\/(java.lang.Exception: 3 is odd))
+2016-03-03 03:21:21,940 |DEBUG|  - [source] Element: 4
+2016-03-03 03:21:21,940 |DEBUG|  - [flow2] Element: \/-(4)
+2016-03-03 03:21:21,941 |DEBUG|  - [flow1] Element: 4
+2016-03-03 03:21:21,941 |INFO |  - [sink] (4, 4)
+2016-03-03 03:21:21,941 |DEBUG|  - [source] Element: 5
+2016-03-03 03:21:21,941 |DEBUG|  - [flow2] Element: -\/(java.lang.Exception: 5 is odd)
+2016-03-03 03:21:21,941 |DEBUG|  - [flow1] Element: 5
+2016-03-03 03:21:21,942 |ERROR|  - error in input: (5,-\/(java.lang.Exception: 5 is odd))
+2016-03-03 03:21:21,942 |DEBUG|  - [source] Element: 6
+2016-03-03 03:21:21,942 |DEBUG|  - [flow2] Element: \/-(6)
+2016-03-03 03:21:21,942 |DEBUG|  - [flow1] Element: 6
+2016-03-03 03:21:21,942 |INFO |  - [sink] (6, 6)
+2016-03-03 03:21:21,943 |DEBUG|  - [source] Element: 7
+2016-03-03 03:21:21,943 |DEBUG|  - [flow2] Element: -\/(java.lang.Exception: 7 is odd)
+2016-03-03 03:21:21,943 |DEBUG|  - [flow1] Element: 7
+2016-03-03 03:21:21,944 |ERROR|  - error in input: (7,-\/(java.lang.Exception: 7 is odd))
+2016-03-03 03:21:21,944 |DEBUG|  - [source] Element: 8
+2016-03-03 03:21:21,944 |DEBUG|  - [flow2] Element: \/-(8)
+2016-03-03 03:21:21,944 |DEBUG|  - [flow1] Element: 8
+2016-03-03 03:21:21,944 |INFO |  - [sink] (8, 8)
+2016-03-03 03:21:21,944 |DEBUG|  - [source] Element: 9
+2016-03-03 03:21:21,945 |DEBUG|  - [flow2] Element: -\/(java.lang.Exception: 9 is odd)
+2016-03-03 03:21:21,945 |DEBUG|  - [flow1] Element: 9
+2016-03-03 03:21:21,945 |ERROR|  - error in input: (9,-\/(java.lang.Exception: 9 is odd))
+2016-03-03 03:21:21,945 |DEBUG|  - [source] Element: 10
+2016-03-03 03:21:21,945 |DEBUG|  - [source] Upstream finished.
+2016-03-03 03:21:21,945 |DEBUG|  - [flow2] Element: \/-(10)
+2016-03-03 03:21:21,946 |DEBUG|  - [flow2] Upstream finished.
+2016-03-03 03:21:21,946 |DEBUG|  - [flow1] Element: 10
+2016-03-03 03:21:21,946 |INFO |  - [sink] (10, 10)
+2016-03-03 03:21:21,947 |DEBUG|  - [flow1] Downstream finished.
+```
+---
+# Final touch
+```
+  val filter = Flow[(String, \/[Throwable, String])].filter {
+    case (s1, \/-(s2)) => true
+    case _ => false
+  }
+
+[...]
+
+  example
+    .withAttributes(ActorAttributes.supervisionStrategy(decider))
+    .via(filter)
+    .runWith(source, sink)
+    ._2.map(p => log.info(p.toString))
+
+```
+---
+```terminal
+2016-03-03 03:23:15,181 |DEBUG| - [source] Element: 1
+2016-03-03 03:23:15,202 |DEBUG| - [flow2] Element: -\/(java.lang.Exception: 1 is odd)
+2016-03-03 03:23:15,204 |DEBUG| - [flow1] Element: 1
+2016-03-03 03:23:15,204 |DEBUG| - [source] Element: 2
+2016-03-03 03:23:15,205 |DEBUG| - [flow2] Element: \/-(2)
+2016-03-03 03:23:15,205 |DEBUG| - [flow1] Element: 2
+2016-03-03 03:23:15,206 |INFO | - [sink] (2, 2)
+2016-03-03 03:23:15,206 |DEBUG| - [source] Element: 3
+2016-03-03 03:23:15,207 |DEBUG| - [flow2] Element: -\/(java.lang.Exception: 3 is odd)
+2016-03-03 03:23:15,207 |DEBUG| - [flow1] Element: 3
+2016-03-03 03:23:15,207 |DEBUG| - [source] Element: 4
+2016-03-03 03:23:15,207 |DEBUG| - [flow2] Element: \/-(4)
+2016-03-03 03:23:15,207 |DEBUG| - [flow1] Element: 4
+2016-03-03 03:23:15,208 |INFO | - [sink] (4, 4)
+2016-03-03 03:23:15,208 |DEBUG| - [source] Element: 5
+2016-03-03 03:23:15,208 |DEBUG| - [flow2] Element: -\/(java.lang.Exception: 5 is odd)
+2016-03-03 03:23:15,208 |DEBUG| - [flow1] Element: 5
+2016-03-03 03:23:15,208 |DEBUG| - [source] Element: 6
+2016-03-03 03:23:15,209 |DEBUG| - [flow2] Element: \/-(6)
+2016-03-03 03:23:15,209 |DEBUG| - [flow1] Element: 6
+2016-03-03 03:23:15,209 |INFO | - [sink] (6, 6)
+2016-03-03 03:23:15,209 |DEBUG| - [source] Element: 7
+2016-03-03 03:23:15,209 |DEBUG| - [flow2] Element: -\/(java.lang.Exception: 7 is odd)
+2016-03-03 03:23:15,210 |DEBUG| - [flow1] Element: 7
+2016-03-03 03:23:15,210 |DEBUG| - [source] Element: 8
+2016-03-03 03:23:15,210 |DEBUG| - [flow2] Element: \/-(8)
+2016-03-03 03:23:15,210 |DEBUG| - [flow1] Element: 8
+2016-03-03 03:23:15,210 |INFO | - [sink] (8, 8)
+2016-03-03 03:23:15,210 |DEBUG| - [source] Element: 9
+2016-03-03 03:23:15,211 |DEBUG| - [flow2] Element: -\/(java.lang.Exception: 9 is odd)
+2016-03-03 03:23:15,211 |DEBUG| - [flow1] Element: 9
+2016-03-03 03:23:15,211 |DEBUG| - [source] Element: 10
+2016-03-03 03:23:15,211 |DEBUG| - [source] Upstream finished.
+2016-03-03 03:23:15,211 |DEBUG| - [flow2] Element: \/-(10)
+2016-03-03 03:23:15,212 |DEBUG| - [flow2] Upstream finished.
+2016-03-03 03:23:15,212 |DEBUG| - [flow1] Element: 10
+2016-03-03 03:23:15,212 |DEBUG| - [flow1] Downstream finished.
+2016-03-03 03:23:15,212 |INFO | - [sink] (10, 10)
+2016-03-03 03:23:15,212 |INFO | - Done
+```
+
+---
+class: center, middle
+# Thank You!
+### Questions?
+        </textarea>
+        <script src="https://gnab.github.io/remark/downloads/remark-latest.min.js"></script>
+        <script src="http://ajax.googleapis.com/ajax/libs/jquery/1.11.0/jquery.min.js"></script>
+        <script type="text/javascript">
+         var hljs = remark.highlighter.engine;
+        </script>
+        <script src="terminal.language.js" type="text/javascript"></script>
+        <script>
+         var slideshow = remark.create({
+             ratio: '16:9',
+             countIncrementalSlides: false,
+             highlightLanguage: 'scala',
+             highlightStyle: 'solarized-dark'
+         });
+         // extract the embedded styling from ansi spans
+         $('code.terminal > span.hljs-ansi').replaceWith(function(i, x) {
+             return x.replace(/<(\/?(\w+).*?)>/g, '<$1>')
+         });
+        </script>
+    </body>
+</html>
