@@ -13,11 +13,45 @@
              font-weight: normal;
          }
          .remark-code, .remark-inline-code { font-family: 'Ubuntu Mono'; }
+         .inverse {
+             background: #272822;
+             color: #777872;
+             text-shadow: 0 0 20px #333;
+         }
+         .inverse a {
+             color: #5F9EA0;
+             text-decoration: none;
+         }
+
+         .inverse h1, .inverse h2 {
+             color: #f3f3f3;
+             line-height: 0.8em;
+         }
+         .footnote {
+             position: absolute;
+             bottom: 3em;
+         }
+
+         #slide-dense .remark-code {
+             font-size: 14px;
+         }
+         #slide-terminal-last .remark-code {
+             font-size: 15px;
+         }
+         /* Slide-specific styling */
+         #slide-inverse .footnote {
+             bottom: 12px;
+             left: 20px;
+         }
         </style>
     </head>
     <body>
         <textarea id="source">
-
+name: inverse
+layout: true
+class: inverse
+---
+template: inverse
 class: center, middle
 
 # Akka Streams
@@ -30,7 +64,7 @@ Radzislaw Galler
 Paycasso Verify Ltd.
 
 ---
-
+template: inverse
 # Akka Streams
 ### Quick overview
 * Allows to define programs as transforming data flow from a source to a sink.
@@ -155,6 +189,7 @@ java.lang.Exception: 1 is odd
 ```
 
 ---
+### Result
 ```terminal
 2016-03-03 02:16:50,175 |DEBUG| - [source] Element: 1
 2016-03-03 02:16:50,181 |ERROR| - Exception was caught, flow was restarted. Error: '1 is odd'
@@ -184,7 +219,7 @@ java.lang.Exception: 1 is odd
 ???
 
 ---
-# Supervision ctd.
+# Supervision, continued
 
 * The supervision decider keeps the stream going but eventually prevents it from completing.
 --
@@ -207,8 +242,9 @@ java.lang.Exception: 1 is odd
 
 ```
 
-See blog post http://blog.lancearlaus.com/akka/streams/scala/2015/05/27/Akka-Streams-Balancing-Buffer/
+.footnote[See blog post http://blog.lancearlaus.com/akka/streams/scala/2015/05/27/Akka-Streams-Balancing-Buffer/]
 ---
+### Result
 ```terminal
 2016-03-03 02:45:43,696 |DEBUG| - [source] Element: 1
 2016-03-03 02:45:43,698 |ERROR| - Exception was caught, flow was restarted. Error: '1 is odd'
@@ -266,6 +302,7 @@ import scalaz.{\/, -\/, \/-}
 
 ```
 ---
+name: dense
 ```terminal
 2016-03-03 03:21:21,913 |DEBUG|  - [source] Element: 1
 2016-03-03 03:21:21,934 |DEBUG|  - [flow2] Element: -\/(java.lang.Exception: 1 is odd)
@@ -329,6 +366,7 @@ import scalaz.{\/, -\/, \/-}
 
 ```
 ---
+name: terminal-last
 ```terminal
 2016-03-03 03:23:15,181 |DEBUG| - [source] Element: 1
 2016-03-03 03:23:15,202 |DEBUG| - [flow2] Element: -\/(java.lang.Exception: 1 is odd)
@@ -375,6 +413,9 @@ import scalaz.{\/, -\/, \/-}
 class: center, middle
 # Thank You!
 ### Questions?
+
+https://github.com/rajish/akka-streams-supervision
+
         </textarea>
         <script src="https://gnab.github.io/remark/downloads/remark-latest.min.js"></script>
         <script src="http://ajax.googleapis.com/ajax/libs/jquery/1.11.0/jquery.min.js"></script>
@@ -387,7 +428,7 @@ class: center, middle
              ratio: '16:9',
              countIncrementalSlides: false,
              highlightLanguage: 'scala',
-             highlightStyle: 'solarized-dark'
+             highlightStyle: 'zenburn'
          });
          // extract the embedded styling from ansi spans
          $('code.terminal > span.hljs-ansi').replaceWith(function(i, x) {
